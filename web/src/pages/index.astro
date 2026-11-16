@@ -1,0 +1,389 @@
+---
+import payload from '../data/charts.json';
+// inlined verbatim so the built page is one self-contained HTML file
+import appSource from '../scripts/app.js?raw';
+
+// The whole chart set ships with the page (202 KB) so switching spots is instant.
+const payloadJson = JSON.stringify(payload).replace(/</g, '\\u003c');
+const seats = payload.heroes;
+const spotCount = payload.meta.charts;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Preflop charts — 6-max 100bb</title>
+    <meta
+      name="description"
+      content={`Interactive ${spotCount}-spot preflop chart library for 6-max cash at 100 big blinds.`}
+    />
+  </head>
+  <body>
+    <header class="top">
+      <div>
+        <h1>Preflop charts</h1>
+        <p class="sub">
+          {payload.meta.format} · {spotCount} spots ·
+          <a href="https://plusev.poker/charts/" rel="noreferrer">plusev.poker data</a>
+        </p>
+      </div>
+      <nav class="positions" aria-label="Your position">
+        {seats.map((hero, index) => (
+          <button type="button" class="pos" data-hero={hero.id} aria-pressed="false">
+            <span class="pos-key">{index + 1}</span>
+            {hero.label}
+          </button>
+        ))}
+      </nav>
+    </header>
+
+    <div class="spots" id="spots" role="group" aria-label="Spot"></div>
+
+    <main>
+      <section class="board" aria-label="Range grid">
+        <div class="grid" id="grid" role="grid" aria-label="Starting hands"></div>
+      </section>
+
+      <aside class="panel">
+        <ol class="history" id="history"></ol>
+        <div class="cellinfo" id="cellinfo" aria-live="polite"></div>
+        <ul class="legend" id="legend"></ul>
+        <p class="stat" id="stat"></p>
+        <button class="copy" id="copy" type="button">Copy range as text</button>
+        <p class="hint" id="hint"></p>
+      </aside>
+    </main>
+
+    <script type="application/json" id="payload" set:html={payloadJson} />
+    <script is:inline set:html={appSource} />
+
+    <style is:global>
+      :root {
+        color-scheme: light dark;
+        --fold: #255bab;
+        --call: #25ab32;
+        --raise: #ab2525;
+        --bg: #f6f7f9;
+        --card: #ffffff;
+        --ink: #14181f;
+        --muted: #6b7280;
+        --line: #e2e6ec;
+        --hot: #111827;
+        --radius: 12px;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0e1116;
+          --card: #161b22;
+          --ink: #e9edf3;
+          --muted: #9aa4b2;
+          --line: #232a34;
+          --hot: #f9fafb;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0 auto;
+        padding: 18px 16px 40px;
+        max-width: 1120px;
+        background: var(--bg);
+        color: var(--ink);
+        font: 15px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      a {
+        color: inherit;
+      }
+
+      .top {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 14px 24px;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 14px;
+      }
+      h1 {
+        margin: 0;
+        font-size: 22px;
+        letter-spacing: -0.02em;
+      }
+      .sub {
+        margin: 2px 0 0;
+        font-size: 12.5px;
+        color: var(--muted);
+      }
+
+      .positions {
+        display: flex;
+        gap: 6px;
+        max-width: 100%;
+        overflow-x: auto;
+        padding: 4px;
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        scrollbar-width: none;
+      }
+      .positions::-webkit-scrollbar {
+        display: none;
+      }
+      .pos {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        min-height: 40px;
+        padding: 0 14px;
+        border: 0;
+        border-radius: 999px;
+        background: transparent;
+        color: var(--muted);
+        font: inherit;
+        font-weight: 650;
+        letter-spacing: 0.02em;
+        cursor: pointer;
+      }
+      .pos:hover {
+        color: var(--ink);
+      }
+      .pos.is-active {
+        background: var(--hot);
+        color: var(--bg);
+      }
+      .pos-key {
+        font-size: 10px;
+        opacity: 0.6;
+        font-weight: 500;
+      }
+      @media (max-width: 520px) {
+        body {
+          padding: 12px 10px 32px;
+        }
+        .pos {
+          padding: 0 10px;
+        }
+        .pos-key {
+          display: none;
+        }
+        .board {
+          padding: 6px;
+        }
+      }
+
+      .spots {
+        display: flex;
+        gap: 8px;
+        overflow-x: auto;
+        padding: 2px 2px 10px;
+        scrollbar-width: thin;
+      }
+      .chip {
+        flex: 0 0 auto;
+        display: grid;
+        gap: 1px;
+        min-height: 46px;
+        padding: 7px 13px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--card);
+        color: var(--ink);
+        font: inherit;
+        text-align: left;
+        cursor: pointer;
+      }
+      .chip:hover {
+        border-color: var(--muted);
+      }
+      .chip.is-active {
+        border-color: var(--hot);
+        box-shadow: inset 0 0 0 1px var(--hot);
+      }
+      .chip-main {
+        font-weight: 650;
+        font-size: 13.5px;
+        white-space: nowrap;
+      }
+      .chip-sub {
+        font-size: 10.5px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        white-space: nowrap;
+      }
+
+      main {
+        display: grid;
+        gap: 18px;
+        align-items: start;
+      }
+      @media (min-width: 880px) {
+        main {
+          grid-template-columns: minmax(0, 1fr) 320px;
+        }
+      }
+
+      .board {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        padding: 10px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(13, minmax(0, 1fr));
+        gap: 1px;
+        border-radius: 6px;
+        overflow: hidden;
+      }
+      .cell {
+        aspect-ratio: 1;
+        display: grid;
+        place-items: center;
+        font-size: clamp(8px, 2.6vw, 12px);
+        font-weight: 650;
+        color: #fff;
+        cursor: pointer;
+        user-select: none;
+        transition: transform 0.06s ease;
+      }
+      .cell.is-dark {
+        color: #c7ccd4;
+      }
+      .cell:hover,
+      .cell.is-picked {
+        outline: 2px solid var(--hot);
+        outline-offset: -2px;
+        transform: scale(1.06);
+      }
+
+      .panel {
+        display: grid;
+        gap: 12px;
+        align-content: start;
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        padding: 14px 16px;
+      }
+      .history {
+        margin: 0;
+        padding: 0;
+        list-style: none;
+        display: grid;
+        gap: 5px;
+        font-size: 13px;
+        color: var(--muted);
+        counter-reset: step;
+      }
+      .history li {
+        position: relative;
+        padding-left: 20px;
+        counter-increment: step;
+      }
+      .history li::before {
+        content: counter(step);
+        position: absolute;
+        left: 0;
+        top: 1px;
+        width: 14px;
+        height: 14px;
+        display: grid;
+        place-items: center;
+        border-radius: 50%;
+        background: var(--line);
+        color: var(--muted);
+        font-size: 9px;
+        font-weight: 700;
+      }
+      .history li.is-last {
+        color: var(--ink);
+        font-weight: 600;
+      }
+      .history li.is-last::before {
+        background: var(--hot);
+        color: var(--bg);
+      }
+
+      .cellinfo {
+        min-height: 46px;
+        display: grid;
+        gap: 3px;
+        padding: 9px 11px;
+        border-radius: 10px;
+        background: var(--bg);
+        border: 1px solid var(--line);
+        font-size: 13px;
+      }
+      .cellinfo b {
+        font-size: 14px;
+      }
+      .fracs {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px 10px;
+      }
+      .frac {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        font-size: 12.5px;
+      }
+      .frac i {
+        width: 9px;
+        height: 9px;
+        border-radius: 2px;
+        display: inline-block;
+      }
+      .muted {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px 14px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+        font-size: 12.5px;
+      }
+      .legend i {
+        width: 11px;
+        height: 11px;
+        border-radius: 3px;
+        display: inline-block;
+        margin-right: 5px;
+        vertical-align: -1px;
+      }
+      .stat {
+        margin: 0;
+        font-size: 12.5px;
+        color: var(--muted);
+      }
+      .copy {
+        min-height: 40px;
+        border-radius: 10px;
+        border: 1px solid var(--line);
+        background: var(--bg);
+        color: var(--ink);
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .copy:hover {
+        border-color: var(--muted);
+      }
+      .hint {
+        margin: 0;
+        font-size: 11.5px;
+        color: var(--muted);
+        white-space: pre-wrap;
+      }
+    </style>
+  </body>
+</html>
