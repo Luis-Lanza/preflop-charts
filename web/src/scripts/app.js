@@ -1,18 +1,29 @@
 // Plain ES module, inlined into the built page so the site works as one file.
-// Types live in JSDoc so an editor can still check it.
+//
+// Navigation is a cascade: your seat, then who is in the hand (nobody, one
+// rival, or two earlier players), then the situations that pair unlocks. All of
+// that structure is precomputed in web/src/data/charts.json (see
+// scripts/build_web_data.py); this file only indexes and renders it.
 //
 // @typedef {{ color: string, from: number, to: number }} Segment
-// @typedef {{ color: string, label: string }} LegendEntry
+// @typedef {{ id: string, label: string, sub: string }} Situation
+// @typedef {{ rival: string, label: string, side: "before"|"after",
+//   situations: Situation[] }} Pair
+// @typedef {{ opener: string, openerLabel: string, third: string,
+//   thirdLabel: string, situations: Situation[] }} Triple
+// @typedef {{ solo: Situation|null, pairs: Pair[], triples: Triple[] }} Nav
 // @typedef {{ id: string, family: string, familyLabel: string, hero: string,
-//   heroLabel: string, headline: string, decision: string, history: string[],
-//   stat: string, action: string, legend: LegendEntry[], g: string }} Spot
-// @typedef {{ id: string, label: string, spots: Spot[] }} Hero
+//   headline: string, chip: string, decision: string,
+//   steps: { seat: string, action: string }[], history: string[],
+//   rivals: string[], stat: string, action: string,
+//   legend: { color: string, label: string }[], g: string }} Spot
 // @typedef {{ meta: object, patterns: Segment[][], hands: string[],
-//   combos: number[], heroes: Hero[] }} Payload
+//   combos: number[], spots: Spot[], nav: Record<string, Nav>,
+//   heroes: { id: string, label: string }[] }} Payload
 
 const OUT_OF_RANGE = '#1F1E1E';
 const COMBOS_TOTAL = 1326;
-const HINT = 'Keys: 1-6 pick a seat · [ and ] cycle spots';
+const HINT = 'Keys: 1-6 seat · [ ] situation · t two players before you';
 
 /** @type {Payload} */
 const payload = JSON.parse(document.getElementById('payload').textContent);
@@ -21,10 +32,11 @@ const CW = payload.meta.codeWidth;
 const PATTERNS = payload.patterns;
 const HANDS = payload.hands;
 const COMBOS = payload.combos;
+const BY_ID = new Map(payload.spots.map((spot) => [spot.id, spot]));
 
 const el = {
   positions: document.querySelectorAll('.pos'),
-  spots: document.getElementById('spots'),
+  nav: document.getElementById('nav'),
   grid: document.getElementById('grid'),
   history: document.getElementById('history'),
   cellinfo: document.getElementById('cellinfo'),
@@ -35,39 +47,72 @@ const el = {
 };
 
 const state = {
-  hero: payload.heroes[0].id,
-  spot: payload.heroes[0].spots[0].id,
+  hero: 'utg',
+  /** rival seat id, or null for "everyone folded"; the opener in two-rival mode */
+  rival: null,
+  /** the third player when two rivals are in the hand */
+  third: null,
+  twoWay: false,
+  spot: null,
 };
 
-/** @param {string} id @returns {Hero} */
-function heroOf(id) {
-  return payload.heroes.find((hero) => hero.id === id) ?? payload.heroes[0];
+function tree() {
+  return payload.nav[state.hero];
 }
 
-/** @param {string} id @returns {Spot | undefined} */
-function spotOf(id) {
-  for (const hero of payload.heroes) {
-    const found = hero.spots.find((spot) => spot.id === id);
-    if (found) return found;
+/** @param {string} id @returns {Spot} */
+function spot(id) {
+  return BY_ID.get(id);
+}
+
+/** Situations unlocked by the current selection. */
+function situations() {
+  const nav = tree();
+  if (state.twoWay) {
+    const triple = nav.triples.find(
+      (candidate) => candidate.opener === state.rival && candidate.third === state.third,
+    );
+    return triple ? triple.situations : [];
   }
-  return undefined;
+  if (state.rival === null) return nav.solo ? [nav.solo] : [];
+  const pair = nav.pairs.find((candidate) => candidate.rival === state.rival);
+  return pair ? pair.situations : [];
 }
 
-/** @returns {Spot} */
 function current() {
-  return spotOf(state.spot) ?? heroOf(state.hero).spots[0];
+  return spot(state.spot) ?? spot(situations()[0].id);
 }
 
-/** Pattern codes pack one base-36 index per cell. @param {Spot} spot @returns {number[]} */
-function codes(spot) {
-  const out = [];
-  for (let i = 0; i < spot.g.length; i += CW) {
-    out.push(parseInt(spot.g.slice(i, i + CW), 36));
+/** Repair the selection after a change so it always points at a real spot. */
+function normalise() {
+  const nav = tree();
+  if (state.twoWay && !nav.triples.length) state.twoWay = false;
+
+  if (state.twoWay) {
+    const openers = [...new Set(nav.triples.map((triple) => triple.opener))];
+    if (!openers.includes(state.rival)) state.rival = openers[0];
+    const thirds = nav.triples
+      .filter((triple) => triple.opener === state.rival)
+      .map((triple) => triple.third);
+    if (!thirds.includes(state.third)) state.third = thirds[0];
+  } else if (state.rival === null && !nav.solo) {
+    state.rival = nav.pairs[0].rival; // the big blind never opens
+  } else if (state.rival !== null && !nav.pairs.some((pair) => pair.rival === state.rival)) {
+    state.rival = null;
   }
+
+  const list = situations();
+  if (!list.some((situation) => situation.id === state.spot)) {
+    state.spot = list[0].id;
+  }
+}
+
+function codes(chart) {
+  const out = [];
+  for (let i = 0; i < chart.g.length; i += CW) out.push(parseInt(chart.g.slice(i, i + CW), 36));
   return out;
 }
 
-/** @param {Segment[]} segments */
 function background(segments) {
   if (segments.length === 1) return segments[0].color;
   const stops = segments
@@ -76,28 +121,23 @@ function background(segments) {
   return `linear-gradient(to right, ${stops})`;
 }
 
-/** @param {Spot} spot @param {string} color */
-function actionLabel(spot, color) {
+function actionLabel(chart, color) {
   if (color === OUT_OF_RANGE) return 'Not in range';
-  const entry = spot.legend.find((candidate) => candidate.color === color);
+  const entry = chart.legend.find((candidate) => candidate.color === color);
   return entry ? entry.label : 'Unknown';
 }
 
-/** Per-hand fractions, straight from the frozen colour split.
- * @param {Spot} spot @param {number} index */
-function fractions(spot, index) {
-  return PATTERNS[codes(spot)[index]].map((segment) => ({
-    label: actionLabel(spot, segment.color),
+function fractions(chart, index) {
+  return PATTERNS[codes(chart)[index]].map((segment) => ({
+    label: actionLabel(chart, segment.color),
     pct: Math.round(segment.to - segment.from),
     color: segment.color,
   }));
 }
 
-/** Combo-weighted share of the range taking one action.
- * @param {Spot} spot @param {string} color */
-function playedShare(spot, color) {
+function playedShare(chart, color) {
   let combos = 0;
-  codes(spot).forEach((pattern, index) => {
+  codes(chart).forEach((pattern, index) => {
     for (const segment of PATTERNS[pattern]) {
       if (segment.color !== color) continue;
       combos += (COMBOS[index] * (segment.to - segment.from)) / 100;
@@ -106,15 +146,14 @@ function playedShare(spot, color) {
   return (combos / COMBOS_TOTAL) * 100;
 }
 
-/** Copyable text: one line per action, mixed hands keep their share.
- * @param {Spot} spot */
-function rangeText(spot) {
-  const lines = [`${spot.heroLabel} · ${spot.headline} — ${spot.stat}`];
-  const groups = spot.legend
+function rangeText(chart) {
+  const rival = chart.rivals.length ? chart.rivals.join(' + ') : 'everyone folded';
+  const lines = [`${chart.hero} · ${chart.chip} (${rival}) — ${chart.stat}`];
+  const groups = chart.legend
     .filter((entry) => entry.label !== 'Fold')
     .map((entry) => ({ label: entry.label, color: entry.color, hands: [] }));
 
-  codes(spot).forEach((pattern, index) => {
+  codes(chart).forEach((pattern, index) => {
     for (const segment of PATTERNS[pattern]) {
       const pct = Math.round(segment.to - segment.from);
       if (pct === 0) continue;
@@ -127,18 +166,56 @@ function rangeText(spot) {
 
   for (const group of groups) {
     if (!group.hands.length) continue;
-    const share = playedShare(spot, group.color).toFixed(1);
-    lines.push(`${group.label} (${share}%): ${group.hands.join(' ')}`);
+    lines.push(`${group.label} (${playedShare(chart, group.color).toFixed(1)}%): ${group.hands.join(' ')}`);
   }
   return lines.join('\n');
 }
 
-/** @param {Spot} spot @param {string} color */
-function legendRank(spot, color) {
+function legendRank(chart, color) {
   const order = ['Fold', 'Call', 'All-in', 'Not in range', 'Raise'];
-  const label = actionLabel(spot, color);
+  const label = actionLabel(chart, color);
   const found = order.findIndex((prefix) => label.startsWith(prefix));
   return found === -1 ? order.length : found;
+}
+
+// ---------------------------------------------------------------- rendering
+
+function chip(options) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'chip';
+  button.classList.toggle('is-active', Boolean(options.active));
+  button.classList.toggle('is-muted', Boolean(options.disabled));
+  button.disabled = Boolean(options.disabled);
+  if (options.title) button.title = options.title;
+  button.setAttribute('aria-pressed', String(Boolean(options.active)));
+
+  const main = document.createElement('span');
+  main.className = 'chip-main';
+  main.textContent = options.text;
+  button.append(main);
+
+  if (options.sub) {
+    const sub = document.createElement('span');
+    sub.className = 'chip-sub';
+    sub.textContent = options.sub;
+    button.append(sub);
+  }
+  if (options.onClick) button.addEventListener('click', options.onClick);
+  return button;
+}
+
+function row(label, nodes) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'step';
+  const tag = document.createElement('span');
+  tag.className = 'step-label';
+  tag.textContent = label;
+  const chips = document.createElement('div');
+  chips.className = 'chips';
+  chips.append(...nodes);
+  wrapper.append(tag, chips);
+  return wrapper;
 }
 
 function renderPositions() {
@@ -149,31 +226,135 @@ function renderPositions() {
   });
 }
 
-function renderSpots() {
-  const hero = heroOf(state.hero);
-  el.spots.replaceChildren(
-    ...hero.spots.map((spot) => {
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'chip';
-      button.dataset.spot = spot.id;
-      button.classList.toggle('is-active', spot.id === state.spot);
-      button.setAttribute('aria-pressed', String(spot.id === state.spot));
-      const main = document.createElement('span');
-      main.className = 'chip-main';
-      main.textContent = spot.headline;
-      const sub = document.createElement('span');
-      sub.className = 'chip-sub';
-      sub.textContent = spot.familyLabel;
-      button.append(main, sub);
-      return button;
+function renderNav() {
+  const nav = tree();
+  const rows = [];
+
+  // step 2: who is in the hand
+  const rivalChips = [
+    chip({
+      text: 'Nobody',
+      sub: nav.solo ? nav.solo.label : 'the big blind never opens',
+      active: !state.twoWay && state.rival === null,
+      disabled: !nav.solo,
+      title: nav.solo ? 'Everyone folded to you' : 'The big blind never gets to open',
+      onClick: () => {
+        state.twoWay = false;
+        state.rival = null;
+        normalise();
+        render();
+      },
     }),
+  ];
+
+  for (const side of ['before', 'after']) {
+    const group = nav.pairs.filter((pair) => pair.side === side);
+    if (!group.length) continue;
+    const tag = document.createElement('span');
+    tag.className = 'side-tag';
+    tag.textContent = side === 'before' ? '↑ before you' : '↓ after you';
+    rivalChips.push(tag);
+    for (const pair of group) {
+      rivalChips.push(
+        chip({
+          text: pair.label,
+          sub: `${pair.situations.length} spots`,
+          active: !state.twoWay && state.rival === pair.rival,
+          onClick: () => {
+            state.twoWay = false;
+            state.rival = pair.rival;
+            state.third = null;
+            normalise();
+            render();
+          },
+        }),
+      );
+    }
+  }
+
+  if (nav.triples.length) {
+    rivalChips.push(
+      chip({
+        text: 'Two players',
+        sub: `before you · ${nav.triples.length}`,
+        active: state.twoWay,
+        onClick: () => {
+          state.twoWay = !state.twoWay;
+          state.third = null;
+          if (state.twoWay) state.rival = nav.triples[0].opener;
+          normalise();
+          render();
+        },
+      }),
+    );
+  }
+  rows.push(row('Rival', rivalChips));
+
+  if (state.twoWay) {
+    const openers = [...new Set(nav.triples.map((triple) => triple.opener))];
+    rows.push(
+      row(
+        'Opened',
+        openers.map((opener) =>
+          chip({
+            text: opener.toUpperCase(),
+            active: state.rival === opener,
+            onClick: () => {
+              state.rival = opener;
+              state.third = null;
+              normalise();
+              render();
+            },
+          }),
+        ),
+      ),
+    );
+    const thirds = nav.triples
+      .filter((triple) => triple.opener === state.rival)
+      .map((triple) => triple.third);
+    rows.push(
+      row(
+        'Then',
+        thirds.map((third) =>
+          chip({
+            text: third.toUpperCase(),
+            sub: '3-bet or call',
+            active: state.third === third,
+            onClick: () => {
+              state.third = third;
+              normalise();
+              render();
+            },
+          }),
+        ),
+      ),
+    );
+  }
+
+  // step 3: the situation those seats unlock
+  rows.push(
+    row(
+      'Situation',
+      situations().map((situation) =>
+        chip({
+          text: situation.label,
+          sub: situation.sub,
+          active: state.spot === situation.id,
+          onClick: () => {
+            state.spot = situation.id;
+            render();
+          },
+        }),
+      ),
+    ),
   );
+
+  el.nav.replaceChildren(...rows);
 }
 
 function renderGrid() {
-  const spot = current();
-  const patterns = codes(spot);
+  const chart = current();
+  const patterns = codes(chart);
   const cells = el.grid.children;
   for (let index = 0; index < HANDS.length; index += 1) {
     const cell = cells[index];
@@ -186,21 +367,19 @@ function renderGrid() {
     cell.classList.remove('is-picked');
     cell.setAttribute(
       'aria-label',
-      `${HANDS[index]}: ${fractions(spot, index)
+      `${HANDS[index]}: ${fractions(chart, index)
         .map((fraction) => `${fraction.label} ${fraction.pct}%`)
         .join(', ')}`,
     );
   }
 }
 
-/** @param {number} index */
 function describe(index) {
-  const spot = current();
+  const chart = current();
   const hand = HANDS[index];
-  const parts = fractions(spot, index);
+  const parts = fractions(chart, index);
   if (parts.length === 1 && parts[0].label === 'Not in range') {
-    el.cellinfo.innerHTML =
-      `<b>${hand}</b><span class="muted">not in range: the previous player never holds this hand</span>`;
+    el.cellinfo.innerHTML = `<b>${hand}</b><span class="muted">not in range: the previous player never holds this hand</span>`;
     return;
   }
   const chips = parts
@@ -209,38 +388,37 @@ function describe(index) {
         `<span class="frac"><i style="background:${part.color}"></i>${part.label} <b>${part.pct}%</b></span>`,
     )
     .join('');
-  el.cellinfo.innerHTML =
-    `<b>${hand}</b><span class="muted">${COMBOS[index]} combos</span><span class="fracs">${chips}</span>`;
+  el.cellinfo.innerHTML = `<b>${hand}</b><span class="muted">${COMBOS[index]} combos</span><span class="fracs">${chips}</span>`;
 }
 
 function renderPanel() {
-  const spot = current();
+  const chart = current();
   el.history.replaceChildren(
-    ...spot.history.map((line, index) => {
+    ...chart.history.map((line, index) => {
       const item = document.createElement('li');
       item.textContent = line;
-      if (index === spot.history.length - 1) item.className = 'is-last';
+      if (index === chart.history.length - 1) item.className = 'is-last';
       return item;
     }),
   );
 
   const used = new Set();
-  codes(spot).forEach((pattern) =>
+  codes(chart).forEach((pattern) =>
     PATTERNS[pattern].forEach((segment) => used.add(segment.color)),
   );
   el.legend.replaceChildren(
     ...Array.from(used)
-      .sort((a, b) => legendRank(spot, a) - legendRank(spot, b))
+      .sort((a, b) => legendRank(chart, a) - legendRank(chart, b))
       .map((color) => {
         const item = document.createElement('li');
         const swatch = document.createElement('i');
         swatch.style.background = color;
-        item.append(swatch, document.createTextNode(actionLabel(spot, color)));
+        item.append(swatch, document.createTextNode(actionLabel(chart, color)));
         return item;
       }),
   );
 
-  el.stat.textContent = `${spot.decision} · ${spot.stat}`;
+  el.stat.textContent = `${chart.decision} · ${chart.stat}`;
   el.cellinfo.innerHTML = '<span class="muted">Hover or tap a hand for its exact mix</span>';
 }
 
@@ -249,17 +427,44 @@ function syncHash() {
   if (window.location.hash !== target) window.history.replaceState(null, '', target);
 }
 
-/** @param {string} hero @param {string} [spot] */
-function select(hero, spot) {
-  state.hero = hero;
-  const spots = heroOf(hero).spots;
-  const wanted = spot ?? state.spot;
-  state.spot = spots.some((candidate) => candidate.id === wanted) ? wanted : spots[0].id;
+function render() {
   renderPositions();
-  renderSpots();
+  renderNav();
   renderGrid();
   renderPanel();
   syncHash();
+}
+
+// ------------------------------------------------------------------ actions
+
+function pickHero(hero) {
+  if (hero === state.hero) return;
+  state.hero = hero;
+  state.twoWay = false;
+  state.rival = null;
+  state.third = null;
+  normalise();
+  render();
+}
+
+function cycleSituation(step) {
+  const list = situations();
+  const index = list.findIndex((situation) => situation.id === state.spot);
+  state.spot = list[(index + step + list.length) % list.length].id;
+  render();
+}
+
+/** Restore a selection from a spot id, used for deep links. */
+function selectSpot(id) {
+  const chart = spot(id);
+  if (!chart) return false;
+  state.hero = chart.hero.toLowerCase();
+  state.rival = chart.rivals.length ? chart.rivals[0].toLowerCase() : null;
+  state.twoWay = chart.rivals.length > 1;
+  state.third = chart.rivals.length > 1 ? chart.rivals[1].toLowerCase() : null;
+  state.spot = id;
+  normalise();
+  return true;
 }
 
 function boot() {
@@ -274,12 +479,7 @@ function boot() {
   );
 
   el.positions.forEach((button) => {
-    button.addEventListener('click', () => select(button.dataset.hero));
-  });
-
-  el.spots.addEventListener('click', (event) => {
-    const chip = event.target.closest('.chip');
-    if (chip) select(state.hero, chip.dataset.spot);
+    button.addEventListener('click', () => pickHero(button.dataset.hero));
   });
 
   el.grid.addEventListener('pointerover', (event) => {
@@ -313,22 +513,34 @@ function boot() {
     const seats = payload.heroes;
     const digit = Number(event.key);
     if (Number.isInteger(digit) && digit >= 1 && digit <= seats.length) {
-      select(seats[digit - 1].id);
+      pickHero(seats[digit - 1].id);
       return;
     }
     if (event.key === '[' || event.key === ']') {
-      const spots = heroOf(state.hero).spots;
-      const index = spots.findIndex((spot) => spot.id === state.spot);
-      const step = event.key === ']' ? 1 : spots.length - 1;
-      select(state.hero, spots[(index + step) % spots.length].id);
+      cycleSituation(event.key === ']' ? 1 : -1);
+      return;
+    }
+    if (event.key === 't' && tree().triples.length) {
+      state.twoWay = !state.twoWay;
+      state.third = null;
+      if (state.twoWay) state.rival = tree().triples[0].opener;
+      normalise();
+      render();
     }
   });
 
   const [hashHero, hashSpot] = window.location.hash.replace(/^#/, '').split('/');
-  const startHero = payload.heroes.some((hero) => hero.id === hashHero)
-    ? hashHero
-    : state.hero;
-  select(startHero, hashSpot);
+  const restored =
+    hashSpot &&
+    spot(hashSpot) &&
+    spot(hashSpot).hero.toLowerCase() === hashHero &&
+    selectSpot(hashSpot);
+  if (!restored) {
+    const known = payload.heroes.some((hero) => hero.id === hashHero);
+    if (known) state.hero = hashHero;
+    normalise();
+  }
+  render();
 
   el.hint.textContent = HINT;
   document.body.dataset.ready = 'true';

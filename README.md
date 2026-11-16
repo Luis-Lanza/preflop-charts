@@ -64,11 +64,15 @@ odd/tasks/                feature specs and task logs
 
 ## Web app
 
-* Seats and spots are buttons: 6 seats, then the spots available from that seat
-  (every folded, vs an open, vs a 3-bet, vs a 4-bet, jams, squeezes, cold 4-bets).
+* Three-step cascade: your seat, then who is in the hand (nobody, one rival split
+  into "acts before/after you", or two earlier players), then the 2-3 situations
+  that selection unlocks. Only the big blind has no "nobody" spot: it never opens.
+* Two rivals (cold 4-bet / squeeze) appear as an extra pair of rows: who opened,
+  then the third player. Those spots exist only where two seats act before you.
 * The breadcrumb spells the action history with the sizes taken from the data.
 * Hover or tap a cell for its exact fractions; the copy button emits the range as text.
-* Keys: `1`-`6` pick a seat, `[` and `]` cycle spots. The URL hash mirrors the
+* Keys: `1`-`6` pick a seat, `[` and `]` cycle situations, `t` toggles the
+  two-rival mode. The URL hash mirrors the
   selection (`#btn/facing-a-raise-btn-vs-co-open`), so a spot can be reloaded or shared.
 * `web/src/scripts/app.js` is inlined at build time, so `web/dist/index.html` is a
   single file you can open with `file://` — no server needed.

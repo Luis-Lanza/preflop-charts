@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-"""Build the compact payload the Astro page renders (spec S7).
+"""Build the payload the Astro page renders (spec S7 of astro-preflop-web.md).
 
 Reads data/charts.json (produced by scripts/scrape.py) and writes
 web/src/data/charts.json with:
 
-  * every chart grouped by the seat that has to act,
-  * a precomputed hero + spot -> chart resolution (the client never derives
-    poker semantics),
-  * cells as indexes into a deduplicated table of colour splits,
-  * a generated action history with the sizes found in the data itself.
+  * one flat list of the 114 spots, each with its colour-coded grid,
+  * a `nav` tree that mirrors how a hand is built: your seat, then who is in
+    the hand (nobody / one rival / two rivals), then the situation that pair
+    unlocks,
+  * structured action steps so the client can show the breadcrumb and knows
+    which seats took part,
+  * cells as indexes into a deduplicated table of colour splits.
+
+The client indexes this data; it never derives poker structure itself.
 
 Usage: python3 scripts/build_web_data.py
 """
@@ -32,23 +36,35 @@ OUT_OF_RANGE = "#1F1E1E"
 FAMILY_ORDER = [
     "rfi",
     "facing-a-raise",
-    "squeezing",
     "facing-a-3-bet",
     "facing-a-4-bet",
     "facing-a-4-bet-all-in",
     "facing-a-5-bet-all-in",
+    "squeezing",
     "cold-4-bet",
 ]
 
 DECISION = {
     "rfi": "Your open",
     "facing-a-raise": "Fold, call or 3-bet",
-    "squeezing": "Fold or squeeze",
     "facing-a-3-bet": "Fold, call or 4-bet",
     "facing-a-4-bet": "Fold, call or 5-bet",
     "facing-a-4-bet-all-in": "Call or fold for stacks",
     "facing-a-5-bet-all-in": "Call or fold for stacks",
+    "squeezing": "Fold or squeeze",
     "cold-4-bet": "Fold or cold 4-bet",
+}
+
+# what the situation chip says: the action waiting for you
+CHIP = {
+    "rfi": "Everyone folded",
+    "facing-a-raise": "Rival opens",
+    "facing-a-3-bet": "Rival 3-bets",
+    "facing-a-4-bet": "Rival 4-bets",
+    "facing-a-4-bet-all-in": "Rival 4-bet jam",
+    "facing-a-5-bet-all-in": "Rival 5-bet jam",
+    "squeezing": "Squeeze",
+    "cold-4-bet": "Cold 4-bet",
 }
 
 BASE36 = "0123456789abcdefghijklmnopqrstuvwxyz"
@@ -72,10 +88,6 @@ def hero_size(chart: dict) -> str:
     return label.removeprefix("Raise ")
 
 
-def sized(size: str, fallback: str) -> str:
-    return fallback if not size else f"{fallback} {size}"
-
-
 def parse_spot(spot: str) -> list[tuple[str, str]]:
     """'vs UTG open, HJ 3-bet' -> [('UTG', 'open'), ('HJ', '3-bet')]."""
     if not spot.startswith("vs "):
@@ -89,112 +101,119 @@ def parse_spot(spot: str) -> list[tuple[str, str]]:
 
 
 def clean_stat(stat: str) -> str:
-    stat = stat.replace("AIbb", "all-in").replace("  ", " ").strip()
-    return stat.rstrip(".").replace(" of hands,", " of hands,")
+    stat = stat.replace("AIbb", "all-in").replace("  ", " ").strip().rstrip(".")
+    return stat.replace(" of hands,", " of hands,")
 
 
 def build_lookups(charts: list[dict]) -> dict:
-    open_size = {}
-    three_bet = {}
-    four_bet = {}
+    open_size, three_bet, four_bet = {}, {}, {}
     for chart in charts:
         size = hero_size(chart)
         if chart["family"] == "rfi":
-            open_size[chart["seat"]] = f"{chart['open_to']:g}bb" if chart["open_to"] else ""
+            open_size[chart["seat"]] = (
+                f"{chart['open_to']:g}bb" if chart["open_to"] else ""
+            )
         elif chart["family"] == "facing-a-raise":
-            # hero 3-bets over the opener named in the spot
             for opener, action in parse_spot(chart["spot"]):
                 if action == "open":
                     three_bet[(chart["seat"], opener)] = size
         elif chart["family"] == "facing-a-3-bet":
-            # hero opened, villain 3-bet, hero's raise is the 4-bet size
             for villain, action in parse_spot(chart["spot"]):
                 if action == "3-bet":
                     four_bet[(chart["seat"], villain)] = size
     return {"open": open_size, "three_bet": three_bet, "four_bet": four_bet}
 
 
-def history(chart: dict, lookups: dict) -> list[str]:
-    family, hero, spot = chart["family"], chart["seat"], chart["spot"]
-    parts = parse_spot(spot)
-    opens, three, four = lookups["open"], lookups["three_bet"], lookups["four_bet"]
-    names = [seat for seat, _ in parts]
+def steps(chart: dict, lookups: dict) -> list[dict]:
+    """Structured record of the action sequence: who did what, in order.
+
+    `actor` is a seat label, or "you" for the hero's own actions. `text` is the
+    breadcrumb line, so prose and structure can never drift apart.
+    """
+    family, hero = chart["family"], chart["seat"]
+    names = [seat for seat, _ in parse_spot(chart["spot"])]
+    opens = lookups["open"]
+    three, four = lookups["three_bet"], lookups["four_bet"]
+    open_sz = lambda seat: opens.get(seat) or "2.5bb"  # noqa: E731
+
+    out: list[dict] = []
+
+    def add(actor: str, action: str, text: str) -> None:
+        out.append({"actor": actor, "action": action, "text": text})
 
     if family == "rfi":
-        return ["Everyone folds to you"]
+        add("you", "open", "Everyone folds to you")
 
-    if family == "facing-a-raise":
+    elif family == "facing-a-raise":
         villain = names[0]
-        return [
-            f"{villain} opens to {opens.get(villain) or '2.5bb'}",
-            f"You are in {hero}",
-        ]
+        add(villain, "open", f"{villain} opens to {open_sz(villain)}")
+        add("you", "respond", f"You are in {hero}")
 
-    if family == "facing-a-3-bet":
+    elif family == "facing-a-3-bet":
         villain = names[0]
-        lines = [f"You open from {hero} to {opens.get(hero) or '2.5bb'}"]
+        add("you", "open", f"You open from {hero} to {open_sz(hero)}")
         if three.get((villain, hero)):
-            lines.append(f"{villain} 3-bets to {three[(villain, hero)]}bb")
+            add(villain, "3bet", f"{villain} 3-bets to {three[(villain, hero)]}bb")
         else:
-            lines.append(f"{villain} 3-bets")
-        return lines
+            add(villain, "3bet", f"{villain} 3-bets")
 
-    if family == "facing-a-4-bet":
+    elif family == "facing-a-4-bet":
         villain = names[0]
-        lines = [f"{villain} opens to {opens.get(villain) or '2.5bb'}"]
+        add(villain, "open", f"{villain} opens to {open_sz(villain)}")
         if three.get((hero, villain)):
-            lines.append(f"You 3-bet to {three[(hero, villain)]}bb")
+            add("you", "3bet", f"You 3-bet to {three[(hero, villain)]}bb")
         else:
-            lines.append("You 3-bet")
+            add("you", "3bet", "You 3-bet")
         if four.get((villain, hero)):
-            lines.append(f"{villain} 4-bets to {four[(villain, hero)]}bb")
+            add(villain, "4bet", f"{villain} 4-bets to {four[(villain, hero)]}bb")
         else:
-            lines.append(f"{villain} 4-bets")
-        return lines
+            add(villain, "4bet", f"{villain} 4-bets")
 
-    if family == "facing-a-4-bet-all-in":
+    elif family == "facing-a-4-bet-all-in":
         villain = names[0]
-        lines = [f"{villain} opens to {opens.get(villain) or '2.5bb'}"]
+        add(villain, "open", f"{villain} opens to {open_sz(villain)}")
         if three.get((hero, villain)):
-            lines.append(f"You 3-bet to {three[(hero, villain)]}bb")
+            add("you", "3bet", f"You 3-bet to {three[(hero, villain)]}bb")
         else:
-            lines.append("You 3-bet")
-        lines.append(f"{villain} shoves all-in")
-        return lines
+            add("you", "3bet", "You 3-bet")
+        add(villain, "4bet-jam", f"{villain} shoves all-in")
 
-    if family == "facing-a-5-bet-all-in":
+    elif family == "facing-a-5-bet-all-in":
         villain = names[0]
-        lines = [f"You open from {hero} to {opens.get(hero) or '2.5bb'}"]
+        add("you", "open", f"You open from {hero} to {open_sz(hero)}")
         if three.get((villain, hero)):
-            lines.append(f"{villain} 3-bets to {three[(villain, hero)]}bb")
+            add(villain, "3bet", f"{villain} 3-bets to {three[(villain, hero)]}bb")
         else:
-            lines.append(f"{villain} 3-bets")
+            add(villain, "3bet", f"{villain} 3-bets")
         if four.get((hero, villain)):
-            lines.append(f"You 4-bet to {four[(hero, villain)]}bb")
+            add("you", "4bet", f"You 4-bet to {four[(hero, villain)]}bb")
         else:
-            lines.append("You 4-bet")
-        lines.append(f"{villain} 5-bet shoves all-in")
-        return lines
+            add("you", "4bet", "You 4-bet")
+        add(villain, "5bet-jam", f"{villain} 5-bet shoves all-in")
 
-    if family == "cold-4-bet":
+    elif family == "cold-4-bet":
         opener, three_bettor = names[0], names[1]
-        lines = [f"{opener} opens to {opens.get(opener) or '2.5bb'}"]
+        add(opener, "open", f"{opener} opens to {open_sz(opener)}")
         if three.get((three_bettor, opener)):
-            lines.append(f"{three_bettor} 3-bets to {three[(three_bettor, opener)]}bb")
+            add(
+                three_bettor,
+                "3bet",
+                f"{three_bettor} 3-bets to {three[(three_bettor, opener)]}bb",
+            )
         else:
-            lines.append(f"{three_bettor} 3-bets")
-        lines.append(f"You cold 4-bet from {hero} to {hero_size(chart)}bb")
-        return lines
+            add(three_bettor, "3bet", f"{three_bettor} 3-bets")
+        add("you", "cold-4bet", f"You cold 4-bet from {hero} to {hero_size(chart)}bb")
 
-    if family == "squeezing":
+    elif family == "squeezing":
         opener, caller = names[0], names[1]
-        return [
-            f"{opener} opens to {opens.get(opener) or '2.5bb'}",
-            f"{caller} calls",
-            f"You squeeze from {hero} to {hero_size(chart)}bb",
-        ]
+        add(opener, "open", f"{opener} opens to {open_sz(opener)}")
+        add(caller, "call", f"{caller} calls")
+        add("you", "squeeze", f"You squeeze from {hero} to {hero_size(chart)}bb")
 
-    raise ValueError(f"unhandled family {family}")
+    else:
+        raise ValueError(f"unhandled family {family}")
+
+    return out
 
 
 def main() -> int:
@@ -202,7 +221,6 @@ def main() -> int:
     charts = [c for family in source["families"] for c in family["charts"]]
     lookups = build_lookups(charts)
 
-    # every chart must use the same 169-cell order, so the client can label cells
     hands = [cell["hand"] for cell in charts[0]["cells"]]
     for chart in charts:
         if [cell["hand"] for cell in chart["cells"]] != hands:
@@ -212,38 +230,39 @@ def main() -> int:
     patterns: list[list[dict]] = []
     pattern_index: dict[tuple, int] = {}
 
-    def pattern_key(cell: dict) -> tuple:
-        return tuple(
+    def pattern_id(cell: dict) -> str:
+        key = tuple(
             (seg["color"], round(seg["from"], 1), round(seg["to"], 1))
             for seg in cell["segments"]
         )
-
-    def pattern_id(cell: dict) -> str:
-        key = pattern_key(cell)
         if key not in pattern_index:
             pattern_index[key] = len(patterns)
-            patterns.append(
-                [
-                    {"color": c, "from": f, "to": t}
-                    for c, f, t in key
-                ]
-            )
+            patterns.append([{"color": c, "from": f, "to": t} for c, f, t in key])
         return code(pattern_index[key])
 
+    family_order = {family: index for index, family in enumerate(FAMILY_ORDER)}
     spots: list[dict] = []
     for chart in charts:
         if not chart["seat"]:
             raise SystemExit(f"chart without a seat: {chart['id']}")
+        steps_ = steps(chart, lookups)
+        # one entry per opponent, in the order they first act (a villain who
+        # opens and later 4-bets is still one rival)
+        rivals = list(
+            dict.fromkeys(step["actor"] for step in steps_ if step["actor"] != "you")
+        )
         spots.append(
             {
                 "id": chart["id"],
                 "family": chart["family"],
                 "familyLabel": chart["family_title"],
                 "hero": chart["seat"],
-                "heroLabel": chart["seat"],
                 "headline": chart["spot"] or "Everyone folded",
+                "chip": CHIP[chart["family"]],
                 "decision": DECISION[chart["family"]],
-                "history": history(chart, lookups),
+                "steps": [{"seat": s["actor"], "action": s["action"]} for s in steps_],
+                "history": [s["text"] for s in steps_],
+                "rivals": rivals,
                 "stat": clean_stat(chart["stat"]),
                 "action": raise_label(chart),
                 "legend": chart["legend"],
@@ -251,20 +270,61 @@ def main() -> int:
             }
         )
 
-    order = {family: index for index, family in enumerate(FAMILY_ORDER)}
+    by_id = {spot["id"]: spot for spot in spots}
+    if len(by_id) != len(spots):
+        raise SystemExit("duplicate spot ids")
 
-    def villain_rank(spot: dict) -> tuple:
-        """Order spots by who acted first, not alphabetically (UTG before BB)."""
-        seats = [seat for seat, _ in parse_spot(spot["headline"])]
-        return tuple(SEAT_ORDER.get(seat, 99) for seat in seats) or (0,)
+    def situation(spot: dict) -> dict:
+        return {"id": spot["id"], "label": spot["chip"], "sub": spot["familyLabel"]}
 
-    spots.sort(
-        key=lambda s: (
-            SEAT_ORDER.get(s["hero"], 99),
-            order.get(s["family"], 99),
-            villain_rank(s),
-        )
-    )
+    nav: dict[str, dict] = {}
+    for seat in SEATS:
+        own = [spot for spot in spots if spot["hero"] == seat]
+        solo = next((s for s in own if not s["rivals"]), None)
+        pairs: list[dict] = []
+        for rival in SEATS:
+            if rival == seat:
+                continue
+            situations = sorted(
+                (s for s in own if s["rivals"] == [rival]),
+                key=lambda s: family_order[s["family"]],
+            )
+            if not situations:
+                continue
+            pairs.append(
+                {
+                    "rival": rival.lower(),
+                    "label": rival,
+                    "side": "before" if SEAT_ORDER[rival] < SEAT_ORDER[seat] else "after",
+                    "situations": [situation(s) for s in situations],
+                }
+            )
+        triples: list[dict] = []
+        for opener in SEATS:
+            for third in SEATS:
+                if opener == third:
+                    continue
+                situations = sorted(
+                    (s for s in own if s["rivals"] == [opener, third]),
+                    key=lambda s: family_order[s["family"]],
+                )
+                if not situations:
+                    continue
+                triples.append(
+                    {
+                        "opener": opener.lower(),
+                        "openerLabel": opener,
+                        "third": third.lower(),
+                        "thirdLabel": third,
+                        "situations": [situation(s) for s in situations],
+                    }
+                )
+        # the big blind never opens, so it has no solo spot
+        nav[seat.lower()] = {
+            "solo": situation(solo) if solo else None,
+            "pairs": pairs,
+            "triples": triples,
+        }
 
     payload = {
         "meta": {
@@ -280,23 +340,24 @@ def main() -> int:
         "patterns": patterns,
         "hands": hands,
         "combos": combos,
-        "heroes": [
-            {
-                "id": seat.lower(),
-                "label": seat,
-                "spots": [s for s in spots if s["hero"] == seat],
-            }
-            for seat in SEATS
-        ],
+        "spots": spots,
+        "nav": nav,
+        "heroes": [{"id": seat.lower(), "label": seat} for seat in SEATS],
     }
 
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(
         json.dumps(payload, separators=(",", ":"), ensure_ascii=False), encoding="utf-8"
     )
-    size = OUT.stat().st_size
+    total = sum(
+        (1 if n["solo"] else 0)
+        + sum(len(p["situations"]) for p in n["pairs"])
+        + sum(len(t["situations"]) for t in n["triples"])
+        for n in nav.values()
+    )
     print(
-        f"{len(spots)} spots, {len(patterns)} patterns -> {OUT.relative_to(ROOT)} ({size / 1024:.0f} KB)",
+        f"{len(spots)} spots ({total} in nav), {len(patterns)} patterns -> "
+        f"{OUT.relative_to(ROOT)} ({OUT.stat().st_size / 1024:.0f} KB)",
         file=sys.stderr,
     )
     return 0
