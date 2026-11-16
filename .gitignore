@@ -1,0 +1,12 @@
+__pycache__/
+.astro/
+
+# generated datasets: rebuilt by scripts/scrape.py + scripts/build_web_data.py
+data/raw/
+data/charts.json
+web/src/data/charts.json
+
+# build outputs
+build/
+web/dist/
+web/node_modules/
