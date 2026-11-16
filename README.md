@@ -3,6 +3,7 @@
 Two consumers of the same data, from the [PlusEV preflop chart library](https://plusev.poker/charts/):
 6-max cash, 100 big blinds, 114 spots across 8 families.
 
+* **Live site** — https://luis-lanza.github.io/preflop-charts/
 * **`web/`** — interactive Astro page: pick your seat, pick the spot, see the chart,
   hover a hand for its exact mix. Builds to one self-contained `index.html`.
 * **`build/plusev-preflop-charts-6max-100bb.pdf`** — printable A4 PDF, 24 pages.
